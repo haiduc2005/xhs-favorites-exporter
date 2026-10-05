@@ -3,6 +3,9 @@
   "name": "XHS Favorites Exporter",
   "version": "0.1.0",
   "description": "导出小红书收藏列表里的 note_id、xsec_token 和 URL。",
+  "permissions": [
+    "storage"
+  ],
   "action": {
     "default_title": "XHS Favorites Exporter"
   },

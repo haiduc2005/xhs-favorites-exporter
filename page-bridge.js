@@ -10,11 +10,24 @@
   var initialSnapshotSent = false;
   var pollAttempts = 0;
   var maxPollAttempts = 60;
+  var channelToken = null;
+
+  try {
+    var currentScript = document.currentScript;
+    channelToken =
+      (currentScript &&
+        currentScript.dataset &&
+        currentScript.dataset.xhsBridgeToken) ||
+      null;
+  } catch (readTokenError) {
+    channelToken = null;
+  }
 
   function emit(type, payload) {
     window.postMessage(
       {
         source: BRIDGE_SOURCE,
+        channel: channelToken,
         type: type,
         payload: payload || {}
       },
@@ -224,27 +237,84 @@
     var notesCollection = unwrapReactive(userState.notes);
     var queriesCollection = unwrapReactive(userState.noteQueries);
 
-    if (!notesCollection) {
+    var keys = [];
+
+    if (Array.isArray(notesCollection)) {
+      for (var index = 0; index < notesCollection.length; index += 1) {
+        keys.push(String(index));
+      }
+    } else if (notesCollection && typeof notesCollection === "object") {
+      keys = Object.keys(notesCollection);
+    } else {
       return null;
     }
 
-    var favoriteList = Array.isArray(notesCollection)
-      ? notesCollection[1]
-      : notesCollection[1];
-    var favoriteQuery = Array.isArray(queriesCollection)
-      ? queriesCollection[1]
-      : queriesCollection && queriesCollection[1];
+    var candidates = [];
 
-    var normalizedItems = extractFavoriteItems(favoriteList)
-      .map(function mapFavoriteItem(item) {
-        return normalizeFavoriteItem(item, "ssr");
-      })
-      .filter(Boolean);
+    keys.forEach(function buildCandidate(key) {
+      var rawList = Array.isArray(notesCollection)
+        ? notesCollection[Number(key)]
+        : notesCollection[key];
+
+      if (rawList == null) {
+        return;
+      }
+
+      var normalizedItems = extractFavoriteItems(rawList)
+        .map(function mapFavoriteItem(item) {
+          return normalizeFavoriteItem(item, "ssr");
+        })
+        .filter(Boolean);
+
+      var page = normalizePageInfo(resolveQueryAt(queriesCollection, key));
+
+      if (normalizedItems.length > 0 || page.cursor || page.has_more) {
+        candidates.push({ items: normalizedItems, page: page });
+      }
+    });
+
+    if (candidates.length === 0) {
+      return null;
+    }
+
+    candidates.sort(function sortCandidates(left, right) {
+      return scoreCandidate(right) - scoreCandidate(left);
+    });
+
+    var best = candidates[0];
 
     return {
-      items: normalizedItems,
-      page: normalizePageInfo(favoriteQuery)
+      items: best.items,
+      page: best.page
     };
+  }
+
+  function resolveQueryAt(queriesCollection, key) {
+    if (Array.isArray(queriesCollection)) {
+      return queriesCollection[Number(key)];
+    }
+
+    if (queriesCollection && typeof queriesCollection === "object") {
+      return queriesCollection[key];
+    }
+
+    return null;
+  }
+
+  function scoreCandidate(candidate) {
+    var score = 0;
+
+    if (candidate.page.cursor) {
+      score += 1000;
+    }
+
+    if (candidate.page.has_more) {
+      score += 100;
+    }
+
+    score += Math.min(candidate.items.length, 500);
+
+    return score;
   }
 
   function tryEmitInitialSnapshot(force) {
@@ -255,15 +325,6 @@
     }
 
     if (!force && initialSnapshotSent && snapshot.items.length === 0) {
-      return false;
-    }
-
-    if (
-      !force &&
-      initialSnapshotSent &&
-      snapshot.items.length === 0 &&
-      !snapshot.page.cursor
-    ) {
       return false;
     }
 
@@ -315,12 +376,28 @@
       var startedAt = Date.now();
 
       if (meta && meta.url && meta.url.indexOf(COLLECT_PATH) !== -1) {
+        function emitError(stage, status, url) {
+          emit("BRIDGE_XHR_ERROR", {
+            stage: stage,
+            status: status,
+            url: url,
+            message: stage === "http" ? "HTTP " + status : "请求" + stage
+          });
+        }
+
         this.addEventListener(
           "load",
           function onCollectPageLoaded() {
             var responseUrl = this.responseURL || meta.url || "";
 
             if (responseUrl.indexOf(COLLECT_PATH) === -1) {
+              return;
+            }
+
+            var status = typeof this.status === "number" ? this.status : 0;
+
+            if (status < 200 || status >= 300) {
+              emitError("http", status, responseUrl);
               return;
             }
 
@@ -338,7 +415,7 @@
                 : [];
 
             emit("COLLECT_PAGE", {
-              status: this.status,
+              status: status,
               url: responseUrl,
               duration_ms: Date.now() - startedAt,
               page: {
@@ -358,6 +435,42 @@
                 })
                 .filter(Boolean)
             });
+          },
+          { once: true }
+        );
+
+        this.addEventListener(
+          "error",
+          function onCollectPageError() {
+            emitError(
+              "network",
+              typeof this.status === "number" ? this.status : 0,
+              meta.url
+            );
+          },
+          { once: true }
+        );
+
+        this.addEventListener(
+          "timeout",
+          function onCollectPageTimeout() {
+            emitError(
+              "timeout",
+              typeof this.status === "number" ? this.status : 0,
+              meta.url
+            );
+          },
+          { once: true }
+        );
+
+        this.addEventListener(
+          "abort",
+          function onCollectPageAbort() {
+            emitError(
+              "abort",
+              typeof this.status === "number" ? this.status : 0,
+              meta.url
+            );
           },
           { once: true }
         );
