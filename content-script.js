@@ -80,6 +80,76 @@
     return match ? match[1] : null;
   }
 
+  var SITE_NAME_RE = /^(?:新版小红书|小红书|RedNote|rednote|Red Note|Xiaohongshu)$/i;
+  var SITE_SUFFIX_RE = [
+    "新版小红书",
+    "小红书",
+    "RedNote",
+    "rednote",
+    "Red Note",
+    "Xiaohongshu"
+  ];
+
+  function stripSiteSuffix(title) {
+    var clean = String(title || "")
+      .trim()
+      .replace(/\s+/g, " ");
+
+    for (var round = 0; round < 4; round += 1) {
+      var changed = false;
+
+      SITE_SUFFIX_RE.forEach(function removeSiteName(siteName) {
+        var pattern = new RegExp("\\s+[|·\\-–—]\\s*" + siteName + "\\s*$", "i");
+
+        if (pattern.test(clean)) {
+          clean = clean.replace(pattern, "").trim();
+          changed = true;
+        }
+      });
+
+      if (!changed) {
+        break;
+      }
+    }
+
+    if (SITE_NAME_RE.test(clean)) {
+      return "";
+    }
+
+    return clean;
+  }
+
+  function sanitizeFileNamePart(text) {
+    if (text == null) {
+      return null;
+    }
+
+    var cleaned = String(text)
+      .replace(/[\r\n\t]/g, " ")
+      .replace(/\s+/g, " ")
+      .replace(/[\\/:*?"<>|]+/g, "_")
+      .trim()
+      .replace(/^[.\s]+|[.\s]+$/g, "");
+
+    if (!cleaned) {
+      return null;
+    }
+
+    if (cleaned.length > 60) {
+      cleaned = cleaned.slice(0, 60);
+    }
+
+    return cleaned;
+  }
+
+  function getCollectionName() {
+    if (!/^\/board\//.test(window.location.pathname)) {
+      return null;
+    }
+
+    return sanitizeFileNamePart(stripSiteSuffix(document.title));
+  }
+
   function getProfileKey() {
     return window.location.pathname.replace(/\/+$/, "");
   }
@@ -793,12 +863,15 @@
       return String(left.first_seen_at).localeCompare(String(right.first_seen_at));
     });
 
+    var collectionName = getCollectionName();
+
     var payload = {
       exported_at: new Date().toISOString(),
       page_url: window.location.href,
       total_items: items.length,
       missing_token_count: countMissingTokens(),
       page_info: state.pageInfo,
+      collection_name: collectionName || null,
       items: items
     };
 
@@ -807,10 +880,10 @@
     });
     var url = URL.createObjectURL(blob);
     var anchor = document.createElement("a");
-    var fileName =
-      "xhs-favorites-" +
-      new Date().toISOString().replace(/[:.]/g, "-") +
-      ".json";
+    var stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    var fileName = collectionName
+      ? collectionName + "-" + stamp + ".json"
+      : "xhs-favorites-" + stamp + ".json";
 
     anchor.href = url;
     anchor.download = fileName;
