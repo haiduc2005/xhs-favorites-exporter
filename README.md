@@ -1,4 +1,4 @@
-# 小红书收藏导出器
+# 海外版小红书（rednote）收藏导出器
 
 <p align="center">
     <a href="https://linux.do/t/topic/1777230" alt="LINUX DO">
@@ -59,7 +59,7 @@
 ```json
 {
   "exported_at": "2026-04-13T12:00:00.000Z",
-  "page_url": "https://www.xiaohongshu.com/user/profile/...",
+  "page_url": "https://www.rednote.com/user/profile/...",
   "total_items": 87,
   "missing_token_count": 3,
   "page_info": {
@@ -70,7 +70,7 @@
     {
       "note_id": "6805d5dc000000001c0328ce",
       "xsec_token": "ABCD1234",
-      "url": "https://www.xiaohongshu.com/explore/6805d5dc000000001c0328ce?xsec_token=ABCD1234",
+      "url": "https://www.rednote.com/explore/6805d5dc000000001c0328ce?xsec_token=ABCD1234",
       "title": "示例标题",
       "author": "示例作者",
       "cover": "https://...",
