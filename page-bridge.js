@@ -8,6 +8,7 @@
   var BRIDGE_SOURCE = "xhs-favorites-exporter";
   var COLLECT_PATH = "/api/sns/web/v2/note/collect/page";
   var initialSnapshotSent = false;
+  var boardNameSent = false;
   var pollAttempts = 0;
   var maxPollAttempts = 60;
   var channelToken = null;
@@ -262,7 +263,8 @@
 
     return {
       items: best.items,
-      page: best.page
+      page: best.page,
+      board_name: extractBoardNameFromState(rootState)
     };
   }
 
@@ -389,6 +391,90 @@
     return score;
   }
 
+  function extractBoardNameFromState(rootState) {
+    var boardMatch = window.location.pathname.match(/^\/board\/([^/]+)/);
+
+    if (!boardMatch || !rootState) {
+      return null;
+    }
+
+    var boardId = boardMatch[1];
+    var visited = new Set();
+    var budget = 20000;
+    var steps = 0;
+    var found = null;
+    var nameKeys = [
+      "name",
+      "title",
+      "boardName",
+      "board_name",
+      "collectionName",
+      "collection_name",
+      "displayName",
+      "folderName"
+    ];
+
+    function plausibleName(text) {
+      if (typeof text !== "string" || text.length < 1 || text.length > 60) {
+        return false;
+      }
+
+      if (/^https?:\/\//i.test(text)) {
+        return false;
+      }
+
+      if (/^[\d\s:.,\-+]+$/.test(text)) {
+        return false;
+      }
+
+      return true;
+    }
+
+    function visit(value) {
+      if (found || value == null || typeof value !== "object") {
+        return;
+      }
+
+      var unwrapped = unwrapReactive(value);
+
+      if (typeof unwrapped !== "object" || unwrapped == null || visited.has(unwrapped)) {
+        return;
+      }
+
+      visited.add(unwrapped);
+      steps += 1;
+
+      if (steps > budget) {
+        return;
+      }
+
+      if (!Array.isArray(unwrapped)) {
+        var parentKeys = Object.keys(unwrapped);
+
+        for (var index = 0; index < parentKeys.length; index += 1) {
+          if (String(unwrapped[parentKeys[index]]) === boardId) {
+            for (var nameIndex = 0; nameIndex < nameKeys.length; nameIndex += 1) {
+              var nameValue = unwrapped[nameKeys[nameIndex]];
+
+              if (plausibleName(nameValue)) {
+                found = String(nameValue).trim();
+                return;
+              }
+            }
+          }
+        }
+      }
+
+      var ownKeys = Object.keys(unwrapped);
+      for (var keyIndex = 0; keyIndex < ownKeys.length; keyIndex += 1) {
+        visit(unwrapped[ownKeys[keyIndex]]);
+      }
+    }
+
+    visit(rootState);
+    return found;
+  }
+
   function tryEmitInitialSnapshot(force) {
     var snapshot = readInitialSnapshot();
 
@@ -412,6 +498,17 @@
   function startInitialStatePolling() {
     var timer = window.setInterval(function pollInitialState() {
       pollAttempts += 1;
+
+      if (!boardNameSent) {
+        var boardName = extractBoardNameFromState(
+          unwrapReactive(window.__INITIAL_STATE__)
+        );
+
+        if (boardName) {
+          boardNameSent = true;
+          emit("BOARD_INFO", { board_name: boardName });
+        }
+      }
 
       if (tryEmitInitialSnapshot(false) || pollAttempts >= maxPollAttempts) {
         window.clearInterval(timer);

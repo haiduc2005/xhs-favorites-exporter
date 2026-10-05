@@ -20,6 +20,7 @@
     idleRounds: 0,
     rounds: 0,
     channelToken: "",
+    collectionName: null,
     lastNetworkAt: 0,
     pageInfo: null,
     statusText: "等待页面就绪",
@@ -36,6 +37,7 @@
     tokenValue: null,
     sourceValue: null,
     statusValue: null,
+    boardNameValue: null,
     startButton: null,
     stopButton: null,
     exportButton: null,
@@ -99,7 +101,7 @@
       var changed = false;
 
       SITE_SUFFIX_RE.forEach(function removeSiteName(siteName) {
-        var pattern = new RegExp("\\s+[|·\\-–—]\\s*" + siteName + "\\s*$", "i");
+        var pattern = new RegExp("\\s*[|·\\-–—]\\s*" + siteName + "\\s*$", "i");
 
         if (pattern.test(clean)) {
           clean = clean.replace(pattern, "").trim();
@@ -147,7 +149,41 @@
       return null;
     }
 
-    return sanitizeFileNamePart(stripSiteSuffix(document.title));
+    var candidates = [];
+
+    if (state.collectionName) {
+      candidates.push(state.collectionName);
+    }
+
+    var ogMeta = null;
+
+    try {
+      ogMeta = document.querySelector('meta[property="og:title"]');
+    } catch (error) {
+      ogMeta = null;
+    }
+
+    if (ogMeta) {
+      var ogValue = ogMeta.content || (ogMeta.getAttribute && ogMeta.getAttribute("content"));
+
+      if (ogValue) {
+        candidates.push(String(ogValue));
+      }
+    }
+
+    if (document.title) {
+      candidates.push(document.title);
+    }
+
+    for (var index = 0; index < candidates.length; index += 1) {
+      var cleaned = sanitizeFileNamePart(stripSiteSuffix(candidates[index]));
+
+      if (cleaned) {
+        return cleaned;
+      }
+    }
+
+    return null;
   }
 
   function getProfileKey() {
@@ -271,6 +307,7 @@
 
     ui.host = null;
     ui.shadow = null;
+    ui.boardNameValue = null;
     ui.countValue = null;
     ui.tokenValue = null;
     ui.sourceValue = null;
@@ -337,6 +374,12 @@
       '.title{' +
       'font-size:15px;' +
       'font-weight:700;' +
+      'margin-bottom:10px;' +
+      '}' +
+      '.board-name{' +
+      'font-size:14px;' +
+      'font-weight:600;' +
+      'color:#e8590c;' +
       'margin-bottom:10px;' +
       '}' +
       '.meta{' +
@@ -406,6 +449,7 @@
       '</style>' +
       '<div id="panel">' +
       '<div class="title">小红书收藏导出器</div>' +
+      '<div class="board-name" data-role="board-name" style="display:none;"></div>' +
       '<div class="meta">' +
       '<div class="card"><div class="label">条目数</div><div class="value" data-role="count">0</div></div>' +
       '<div class="card"><div class="label">缺 token</div><div class="value" data-role="token-missing">0</div></div>' +
@@ -428,6 +472,7 @@
     ui.tokenValue = root.querySelector('[data-role="token-missing"]');
     ui.sourceValue = root.querySelector('[data-role="sources"]');
     ui.statusValue = root.querySelector('[data-role="status"]');
+    ui.boardNameValue = root.querySelector('[data-role="board-name"]');
     ui.startButton = root.querySelector('[data-action="start"]');
     ui.stopButton = root.querySelector('[data-action="stop"]');
     ui.exportButton = root.querySelector('[data-action="export"]');
@@ -718,6 +763,20 @@
     ui.tokenValue.textContent = String(countMissingTokens());
     ui.sourceValue.textContent = summarizeSources();
     ui.statusValue.innerHTML = escapeHtml(state.statusText);
+
+    if (ui.boardNameValue) {
+      if (state.collectionName) {
+        ui.boardNameValue.textContent = "专辑：" + state.collectionName;
+        ui.boardNameValue.style.display = "";
+      } else if (/^\/board\//.test(window.location.pathname)) {
+        ui.boardNameValue.textContent = "专辑：未识别（刷新页面或按「补扫首屏」）";
+        ui.boardNameValue.style.display = "";
+      } else {
+        ui.boardNameValue.textContent = "";
+        ui.boardNameValue.style.display = "none";
+      }
+    }
+
     ui.startButton.disabled = state.running;
     ui.stopButton.disabled = !state.running;
     ui.exportButton.disabled = state.items.size === 0;
@@ -935,8 +994,29 @@
       return;
     }
 
+    if (type === "BOARD_INFO") {
+      if (payload.board_name) {
+        var cleanedBoardName = sanitizeFileNamePart(stripSiteSuffix(String(payload.board_name)));
+
+        if (cleanedBoardName) {
+          state.collectionName = cleanedBoardName;
+          scheduleRender();
+        }
+      }
+      return;
+    }
+
     if (type === "INITIAL_SNAPSHOT") {
       state.pageInfo = payload.page || state.pageInfo;
+
+      if (payload.board_name) {
+        var incomingBoardName = sanitizeFileNamePart(stripSiteSuffix(String(payload.board_name)));
+
+        if (incomingBoardName) {
+          state.collectionName = incomingBoardName;
+        }
+      }
+
       mergeItems(payload.items || []);
       setStatus(
         "已拿到首屏 SSR 数据，目前 " + state.items.size + " 条"
