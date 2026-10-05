@@ -144,6 +144,18 @@
     return cleaned;
   }
 
+  function formatFileDate(date) {
+    var year = date.getFullYear();
+    var month = date.getMonth() + 1;
+    var day = date.getDate();
+
+    return (
+      String(year) +
+      (month < 10 ? "0" : "") + month +
+      (day < 10 ? "0" : "") + day
+    );
+  }
+
   function getCollectionName() {
     if (!/^\/board\//.test(window.location.pathname)) {
       return null;
@@ -939,7 +951,7 @@
     });
     var url = URL.createObjectURL(blob);
     var anchor = document.createElement("a");
-    var stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    var stamp = formatFileDate(new Date());
     var fileName = collectionName
       ? collectionName + "-" + stamp + ".json"
       : "xhs-favorites-" + stamp + ".json";
