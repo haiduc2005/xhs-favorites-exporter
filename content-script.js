@@ -9,7 +9,7 @@
   var SHADOW_HOST_ID = "xhs-favorites-exporter-host";
   var SCAN_EVENT = "xhs-favorites-exporter:scan-now";
   var AUTO_SCROLL_DELAY_MS = 1400;
-  var MAX_IDLE_ROUNDS = 6;
+  var MAX_IDLE_ROUNDS = 10;
   var MAX_COLLECT_ROUNDS = 200;
   var MAX_TITLE_LENGTH = 120;
   var STORAGE_KEY = "xhsFavoritesExportState";
@@ -829,6 +829,7 @@
       left: 0,
       behavior: "smooth"
     });
+    window.dispatchEvent(new Event("scroll"));
   }
 
   function stopCollection(reason) {
@@ -884,7 +885,11 @@
         }
 
         if (state.idleRounds >= MAX_IDLE_ROUNDS && isNearBottom()) {
-          stopCollection("已自动停止：滚动到底且连续多轮无新增");
+          var hasMore = state.pageInfo ? state.pageInfo.has_more : null;
+          var reason = hasMore === false
+            ? "已采集完毕：接口返回已无更多数据"
+            : "已自动停止：滚动到底且连续多轮无新增";
+          stopCollection(reason);
           return;
         }
 

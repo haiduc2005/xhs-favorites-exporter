@@ -7,11 +7,33 @@
 
   var BRIDGE_SOURCE = "xhs-favorites-exporter";
   var COLLECT_PATH = "/api/sns/web/v2/note/collect/page";
+  var BOARD_NOTE_PATH = "/api/sns/web/v1/board/note";
   var initialSnapshotSent = false;
   var boardNameSent = false;
   var pollAttempts = 0;
   var maxPollAttempts = 60;
   var channelToken = null;
+
+  function isTargetNoteRequest(url) {
+    if (!url || typeof url !== "string") {
+      return false;
+    }
+
+    if (url.indexOf(COLLECT_PATH) !== -1) {
+      return true;
+    }
+
+    if (url.indexOf(BOARD_NOTE_PATH) !== -1 || url.indexOf("/board/note") !== -1) {
+      return true;
+    }
+
+    var isBoardContext = /\/board\//.test(window.location.pathname);
+    if (isBoardContext && url.indexOf("board") !== -1 && url.indexOf("note") !== -1) {
+      return true;
+    }
+
+    return false;
+  }
 
   try {
     var currentScript = document.currentScript;
@@ -227,6 +249,10 @@
       return collection.items;
     }
 
+    if (Array.isArray(collection.notes)) {
+      return collection.notes;
+    }
+
     if (Array.isArray(collection.noteList)) {
       return collection.noteList;
     }
@@ -238,6 +264,41 @@
     return [];
   }
 
+  function collectBoardCandidates(rootState) {
+    var boardMatch = window.location.pathname.match(/^\/board\/([^/]+)/);
+    if (!boardMatch || !rootState) {
+      return [];
+    }
+
+    var boardId = boardMatch[1];
+    var boardState = unwrapReactive(rootState.board) || {};
+    var feedsMap = unwrapReactive(boardState.boardFeedsMap) || {};
+    var boardFeed = unwrapReactive(feedsMap[boardId]);
+
+    if (!boardFeed) {
+      return [];
+    }
+
+    var rawNotes = extractFavoriteItems(boardFeed);
+    var normalizedItems = rawNotes
+      .map(function mapFavoriteItem(item) {
+        return normalizeFavoriteItem(item, "ssr");
+      })
+      .filter(Boolean);
+
+    if (normalizedItems.length === 0 && !boardFeed.cursor && !boardFeed.hasMore) {
+      return [];
+    }
+
+    return [{
+      items: normalizedItems,
+      page: normalizePageInfo({
+        cursor: boardFeed.cursor,
+        has_more: boardFeed.hasMore != null ? boardFeed.hasMore : boardFeed.has_more
+      })
+    }];
+  }
+
   function readInitialSnapshot() {
     var rootState = unwrapReactive(window.__INITIAL_STATE__);
 
@@ -245,7 +306,11 @@
       return null;
     }
 
-    var candidates = collectProfileCandidates(rootState);
+    var candidates = collectBoardCandidates(rootState);
+
+    if (candidates.length === 0) {
+      candidates = collectProfileCandidates(rootState);
+    }
 
     if (candidates.length === 0) {
       candidates = scanStateForCandidates(rootState, 3);
@@ -544,12 +609,7 @@
       var meta = this.__xhsFavoritesExporterMeta;
       var startedAt = Date.now();
 
-      var isBoardContext = /\/board\//.test(window.location.pathname);
-      var isCollectRequest =
-        meta &&
-        meta.url &&
-        (meta.url.indexOf(COLLECT_PATH) !== -1 ||
-          (isBoardContext && meta.url.indexOf("collect") !== -1));
+      var isCollectRequest = meta && isTargetNoteRequest(meta.url);
 
       if (isCollectRequest) {
         function emitError(stage, status, url) {
@@ -565,10 +625,7 @@
           "load",
           function onCollectPageLoaded() {
             var responseUrl = this.responseURL || meta.url || "";
-            var isCollectResponse =
-              responseUrl.indexOf(COLLECT_PATH) !== -1 ||
-              (/\/board\//.test(window.location.pathname) &&
-                responseUrl.indexOf("collect") !== -1);
+            var isCollectResponse = isTargetNoteRequest(responseUrl);
 
             if (!isCollectResponse) {
               return;
@@ -667,6 +724,7 @@
   installXmlHttpRequestHook();
   startInitialStatePolling();
   emit("BRIDGE_READY", {
-    collect_path: COLLECT_PATH
+    collect_path: COLLECT_PATH,
+    board_note_path: BOARD_NOTE_PATH
   });
 })();
