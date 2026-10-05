@@ -118,6 +118,20 @@
     return value == null ? null : String(value);
   }
 
+  function buildNoteUrl(noteId, token) {
+    var boardMatch = window.location.pathname.match(/^\/board\/([^/]+)/);
+    var baseUrl = boardMatch
+      ? "https://www.rednote.com/board/" +
+        encodeURIComponent(boardMatch[1]) +
+        "/" +
+        encodeURIComponent(String(noteId))
+      : "https://www.rednote.com/explore/" + encodeURIComponent(String(noteId));
+
+    return token
+      ? baseUrl + "?xsec_token=" + encodeURIComponent(String(token))
+      : baseUrl;
+  }
+
   function normalizeFavoriteItem(rawItem, source) {
     var item = unwrapReactive(rawItem) || {};
     var noteCard = unwrapReactive(item.noteCard) || item;
@@ -168,10 +182,7 @@
       interactInfo.liked_count
     ]);
 
-    var baseUrl = "https://www.rednote.com/explore/" + encodeURIComponent(String(noteId));
-    var url = xsecToken
-      ? baseUrl + "?xsec_token=" + encodeURIComponent(String(xsecToken))
-      : baseUrl;
+    var url = buildNoteUrl(noteId, xsecToken);
 
     return {
       note_id: String(noteId),
@@ -227,26 +238,51 @@
   }
 
   function readInitialSnapshot() {
-    var state = unwrapReactive(window.__INITIAL_STATE__);
+    var rootState = unwrapReactive(window.__INITIAL_STATE__);
 
-    if (!state || !state.user) {
+    if (!rootState) {
       return null;
     }
 
-    var userState = unwrapReactive(state.user) || {};
-    var notesCollection = unwrapReactive(userState.notes);
-    var queriesCollection = unwrapReactive(userState.noteQueries);
+    var candidates = collectProfileCandidates(rootState);
 
-    var keys = [];
+    if (candidates.length === 0) {
+      candidates = scanStateForCandidates(rootState, 3);
+    }
+
+    if (candidates.length === 0) {
+      return null;
+    }
+
+    candidates.sort(function sortCandidates(left, right) {
+      return scoreCandidate(right) - scoreCandidate(left);
+    });
+
+    var best = candidates[0];
+
+    return {
+      items: best.items,
+      page: best.page
+    };
+  }
+
+  function collectProfileCandidates(rootState) {
+    var userState = unwrapReactive(rootState.user) || {};
+    var notesCollection = unwrapReactive(userState.notes);
+
+    var keys = null;
 
     if (Array.isArray(notesCollection)) {
+      keys = [];
       for (var index = 0; index < notesCollection.length; index += 1) {
         keys.push(String(index));
       }
     } else if (notesCollection && typeof notesCollection === "object") {
       keys = Object.keys(notesCollection);
-    } else {
-      return null;
+    }
+
+    if (!keys) {
+      return [];
     }
 
     var candidates = [];
@@ -266,27 +302,63 @@
         })
         .filter(Boolean);
 
-      var page = normalizePageInfo(resolveQueryAt(queriesCollection, key));
+      var page = normalizePageInfo(
+        resolveQueryAt(unwrapReactive(userState.noteQueries), key)
+      );
 
       if (normalizedItems.length > 0 || page.cursor || page.has_more) {
         candidates.push({ items: normalizedItems, page: page });
       }
     });
 
-    if (candidates.length === 0) {
-      return null;
+    return candidates;
+  }
+
+  function scanStateForCandidates(rootState, maxDepth) {
+    var candidates = [];
+    var seen = new Set();
+
+    function visit(value, depth) {
+      if (value == null || depth > maxDepth) {
+        return;
+      }
+
+      var unwrapped = unwrapReactive(value);
+
+      if (typeof unwrapped !== "object" || seen.has(unwrapped)) {
+        return;
+      }
+
+      seen.add(unwrapped);
+
+      var normalizedItems = extractFavoriteItems(unwrapped)
+        .map(function mapFavoriteItem(item) {
+          return normalizeFavoriteItem(item, "ssr");
+        })
+        .filter(Boolean);
+
+      if (normalizedItems.length > 0) {
+        candidates.push({
+          items: normalizedItems,
+          page: normalizePageInfo(null)
+        });
+      }
+
+      if (Array.isArray(unwrapped)) {
+        for (var index = 0; index < unwrapped.length; index += 1) {
+          visit(unwrapped[index], depth + 1);
+        }
+        return;
+      }
+
+      var ownKeys = Object.keys(unwrapped);
+      for (var keyIndex = 0; keyIndex < ownKeys.length; keyIndex += 1) {
+        visit(unwrapped[ownKeys[keyIndex]], depth + 1);
+      }
     }
 
-    candidates.sort(function sortCandidates(left, right) {
-      return scoreCandidate(right) - scoreCandidate(left);
-    });
-
-    var best = candidates[0];
-
-    return {
-      items: best.items,
-      page: best.page
-    };
+    visit(rootState, 0);
+    return candidates;
   }
 
   function resolveQueryAt(queriesCollection, key) {
@@ -375,7 +447,14 @@
       var meta = this.__xhsFavoritesExporterMeta;
       var startedAt = Date.now();
 
-      if (meta && meta.url && meta.url.indexOf(COLLECT_PATH) !== -1) {
+      var isBoardContext = /\/board\//.test(window.location.pathname);
+      var isCollectRequest =
+        meta &&
+        meta.url &&
+        (meta.url.indexOf(COLLECT_PATH) !== -1 ||
+          (isBoardContext && meta.url.indexOf("collect") !== -1));
+
+      if (isCollectRequest) {
         function emitError(stage, status, url) {
           emit("BRIDGE_XHR_ERROR", {
             stage: stage,
@@ -389,8 +468,12 @@
           "load",
           function onCollectPageLoaded() {
             var responseUrl = this.responseURL || meta.url || "";
+            var isCollectResponse =
+              responseUrl.indexOf(COLLECT_PATH) !== -1 ||
+              (/\/board\//.test(window.location.pathname) &&
+                responseUrl.indexOf("collect") !== -1);
 
-            if (responseUrl.indexOf(COLLECT_PATH) === -1) {
+            if (!isCollectResponse) {
               return;
             }
 

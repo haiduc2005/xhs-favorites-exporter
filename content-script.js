@@ -67,8 +67,17 @@
 
   var restoreTried = false;
 
-  function isProfilePage() {
-    return /\/user\/profile(\/|$)/.test(window.location.pathname);
+  function isCollectPage() {
+    var path = window.location.pathname;
+    return (
+      /^\/user\/profile\/[^/]+(\/|$)/.test(path) ||
+      /^\/board\/[^/]+\/?$/.test(path)
+    );
+  }
+
+  function getBoardId() {
+    var match = window.location.pathname.match(/^\/board\/([^/]+)/);
+    return match ? match[1] : null;
   }
 
   function getProfileKey() {
@@ -147,7 +156,7 @@
   }
 
   function restoreFromSession() {
-    if (restoreTried || !isProfilePage() || !chrome.storage || !chrome.storage.session) {
+    if (restoreTried || !isCollectPage() || !chrome.storage || !chrome.storage.session) {
       return;
     }
 
@@ -215,7 +224,7 @@
 
       state.lastKnownPath = path;
 
-      if (isProfilePage()) {
+      if (isCollectPage()) {
         ensurePanel();
         restoreFromSession();
         scanDomCards();
@@ -386,8 +395,15 @@
     return text.slice(0, MAX_TITLE_LENGTH);
   }
 
-  function buildExploreUrl(noteId, token) {
-    var baseUrl = "https://www.rednote.com/explore/" + encodeURIComponent(String(noteId));
+  function buildNoteUrl(noteId, token) {
+    var boardId = getBoardId();
+    var baseUrl = boardId
+      ? "https://www.rednote.com/board/" +
+        encodeURIComponent(boardId) +
+        "/" +
+        encodeURIComponent(String(noteId))
+      : "https://www.rednote.com/explore/" + encodeURIComponent(String(noteId));
+
     return token
       ? baseUrl + "?xsec_token=" + encodeURIComponent(String(token))
       : baseUrl;
@@ -409,7 +425,7 @@
     return {
       note_id: noteId,
       xsec_token: token,
-      url: input.url || buildExploreUrl(noteId, token),
+      url: input.url || buildNoteUrl(noteId, token),
       title: normalizeText(input.title),
       author: normalizeText(input.author),
       cover: input.cover || null,
@@ -472,7 +488,7 @@
     }
 
     if (!base.url && base.note_id) {
-      base.url = buildExploreUrl(base.note_id, base.xsec_token);
+      base.url = buildNoteUrl(base.note_id, base.xsec_token);
     }
 
     var sourceList = new Set(base.sources);
@@ -529,14 +545,22 @@
 
     try {
       var url = new URL(href, window.location.origin);
-      var match = url.pathname.match(/\/explore\/([^/?#]+)/);
+      var exploreMatch = url.pathname.match(/\/explore\/([^/?#]+)/);
+      var boardMatch = url.pathname.match(/\/board\/([^/?#]+)\/([^/?#]+)/);
 
-      if (!match) {
+      var noteId = exploreMatch
+        ? decodeURIComponent(exploreMatch[1])
+        : boardMatch
+          ? decodeURIComponent(boardMatch[2])
+          : null;
+
+      if (!noteId) {
         return null;
       }
 
       return {
-        note_id: decodeURIComponent(match[1]),
+        note_id: noteId,
+        board_id: boardMatch ? decodeURIComponent(boardMatch[1]) : null,
         xsec_token: url.searchParams.get("xsec_token"),
         url: url.toString()
       };
@@ -556,15 +580,17 @@
   }
 
   function scanDomCards() {
-    if (!isProfilePage()) {
+    if (!isCollectPage()) {
       return { added: 0, updated: 0 };
     }
 
-    var anchors = Array.from(document.querySelectorAll('a[href*="/explore/"]'));
+    var anchors = Array.from(
+      document.querySelectorAll('a[href*="/board/"], a[href*="/explore/"]')
+    );
     var payload = [];
 
     anchors.forEach(function collectAnchor(anchor) {
-      var parsed = parseNoteIdFromHref(anchor.getAttribute("href") || anchor.href);
+      var parsed = parseNoteIdFromHref(anchor.href || anchor.getAttribute("href"));
 
       if (!parsed || !parsed.note_id) {
         return;
@@ -673,7 +699,7 @@
         return;
       }
 
-      if (!isProfilePage()) {
+      if (!isCollectPage()) {
         stopCollection("已离开收藏页，停止采集");
         return;
       }
@@ -688,7 +714,7 @@
           return;
         }
 
-        if (!isProfilePage()) {
+        if (!isCollectPage()) {
           stopCollection("已离开收藏页，停止采集");
           return;
         }
@@ -728,8 +754,8 @@
       return;
     }
 
-    if (!isProfilePage()) {
-      setStatus("请先进入个人主页的「收藏」Tab 再开始采集");
+    if (!isCollectPage()) {
+      setStatus("请先进入收藏页（个人主页收藏 Tab 或 /board 收藏夹）再开始采集");
       return;
     }
 
@@ -819,20 +845,20 @@
     }
 
     if (type === "BRIDGE_XHR_ERROR") {
-      if (isProfilePage()) {
+      if (isCollectPage()) {
         setStatus("收藏分页请求" + (payload.stage || "失败") + "：" + (payload.message || "未知错误") + "，等待页面自动重试");
       }
       return;
     }
 
     if (type === "XHR_PARSE_ERROR") {
-      if (isProfilePage()) {
+      if (isCollectPage()) {
         setStatus("分页响应解析失败：" + (payload.message || "未知错误"));
       }
       return;
     }
 
-    if (!isProfilePage()) {
+    if (!isCollectPage()) {
       return;
     }
 
@@ -872,7 +898,7 @@
       document.addEventListener(
         "DOMContentLoaded",
         function mountAfterDomReady() {
-          if (isProfilePage()) {
+          if (isCollectPage()) {
             ensurePanel();
             restoreFromSession();
           }
@@ -881,7 +907,7 @@
         { once: true }
       );
     } else {
-      if (isProfilePage()) {
+      if (isCollectPage()) {
         ensurePanel();
         restoreFromSession();
       }
