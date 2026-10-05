@@ -41,6 +41,7 @@
     startButton: null,
     stopButton: null,
     exportButton: null,
+    exportCsvButton: null,
     resetButton: null,
     scanButton: null
   };
@@ -327,6 +328,7 @@
     ui.startButton = null;
     ui.stopButton = null;
     ui.exportButton = null;
+    ui.exportCsvButton = null;
     ui.resetButton = null;
     ui.scanButton = null;
 
@@ -473,7 +475,8 @@
       '<button class="secondary" data-action="stop">停止</button>' +
       '<button class="ghost" data-action="scan">补扫首屏</button>' +
       '<button class="ghost" data-action="export">导出 JSON</button>' +
-      '<button class="warn" data-action="reset" style="grid-column:1 / -1;">清空本次结果</button>' +
+      '<button class="ghost" data-action="export-csv">导出 CSV</button>' +
+      '<button class="warn" data-action="reset">清空本次结果</button>' +
       '</div>' +
       '<div class="hint">先打开小红书个人页的“收藏”Tab，再刷新一次页面。插件会读首屏 SSR，并拦截后续收藏分页的 XHR。</div>' +
       "</div>";
@@ -488,6 +491,7 @@
     ui.startButton = root.querySelector('[data-action="start"]');
     ui.stopButton = root.querySelector('[data-action="stop"]');
     ui.exportButton = root.querySelector('[data-action="export"]');
+    ui.exportCsvButton = root.querySelector('[data-action="export-csv"]');
     ui.resetButton = root.querySelector('[data-action="reset"]');
     ui.scanButton = root.querySelector('[data-action="scan"]');
 
@@ -496,6 +500,7 @@
       stopCollection();
     });
     ui.exportButton.addEventListener("click", exportResults);
+    ui.exportCsvButton.addEventListener("click", exportResultsCsv);
     ui.resetButton.addEventListener("click", resetResults);
     ui.scanButton.addEventListener("click", requestInitialSnapshot);
 
@@ -792,6 +797,9 @@
     ui.startButton.disabled = state.running;
     ui.stopButton.disabled = !state.running;
     ui.exportButton.disabled = state.items.size === 0;
+    if (ui.exportCsvButton) {
+      ui.exportCsvButton.disabled = state.items.size === 0;
+    }
   }
 
   function requestInitialSnapshot() {
@@ -924,17 +932,87 @@
     scheduleRender();
   }
 
+  function sortedItems() {
+    return Array.from(state.items.values()).sort(function sortByTime(left, right) {
+      return String(left.first_seen_at).localeCompare(String(right.first_seen_at));
+    });
+  }
+
+  function buildFileName(collectionName, extension) {
+    var stamp = formatFileDate(new Date());
+    var baseName = collectionName
+      ? collectionName + "-" + stamp
+      : "xhs-favorites-" + stamp;
+    return baseName + "." + extension;
+  }
+
+  function downloadTextFile(fileName, mimeType, content) {
+    var blob = new Blob([content], { type: mimeType });
+    var url = URL.createObjectURL(blob);
+    var anchor = document.createElement("a");
+
+    anchor.href = url;
+    anchor.download = fileName;
+    anchor.style.display = "none";
+    document.documentElement.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    setTimeout(function delayedRevoke() {
+      URL.revokeObjectURL(url);
+    }, 1000);
+  }
+
+  function escapeCsvField(value) {
+    var text = value == null ? "" : String(value);
+
+    if (/^[=+\-@\t\r]/.test(text)) {
+      text = "'" + text;
+    }
+
+    return '"' + text.replace(/"/g, '""') + '"';
+  }
+
+  function buildCsv(items) {
+    var columns = [
+      "note_id",
+      "title",
+      "author",
+      "url",
+      "xsec_token",
+      "liked_count",
+      "note_type",
+      "sources",
+      "cover",
+      "first_seen_at",
+      "last_seen_at"
+    ];
+
+    var lines = [columns.map(function mapHeader(column) {
+      return escapeCsvField(column);
+    }).join(",")];
+
+    items.forEach(function mapRow(item) {
+      var row = columns.map(function mapColumn(column) {
+        var value = column === "sources"
+          ? (item.sources || []).join("/")
+          : item[column];
+        return escapeCsvField(value);
+      }).join(",");
+      lines.push(row);
+    });
+
+    return "\uFEFF" + lines.join("\r\n");
+  }
+
   function exportResults() {
     if (state.items.size === 0) {
       setStatus("当前没有可导出的结果");
       return;
     }
 
-    var items = Array.from(state.items.values()).sort(function sortByTime(left, right) {
-      return String(left.first_seen_at).localeCompare(String(right.first_seen_at));
-    });
-
+    var items = sortedItems();
     var collectionName = getCollectionName();
+    var fileName = buildFileName(collectionName, "json");
 
     var payload = {
       exported_at: new Date().toISOString(),
@@ -946,24 +1024,21 @@
       items: items
     };
 
-    var blob = new Blob([JSON.stringify(payload, null, 2)], {
-      type: "application/json"
-    });
-    var url = URL.createObjectURL(blob);
-    var anchor = document.createElement("a");
-    var stamp = formatFileDate(new Date());
-    var fileName = collectionName
-      ? collectionName + "-" + stamp + ".json"
-      : "xhs-favorites-" + stamp + ".json";
+    downloadTextFile(fileName, "application/json", JSON.stringify(payload, null, 2));
+    setStatus("已导出 " + items.length + " 条到 " + fileName);
+  }
 
-    anchor.href = url;
-    anchor.download = fileName;
-    anchor.style.display = "none";
-    document.documentElement.appendChild(anchor);
-    anchor.click();
-    anchor.remove();
-    URL.revokeObjectURL(url);
+  function exportResultsCsv() {
+    if (state.items.size === 0) {
+      setStatus("当前没有可导出的结果");
+      return;
+    }
 
+    var items = sortedItems();
+    var collectionName = getCollectionName();
+    var fileName = buildFileName(collectionName, "csv");
+
+    downloadTextFile(fileName, "text/csv;charset=utf-8", buildCsv(items));
     setStatus("已导出 " + items.length + " 条到 " + fileName);
   }
 
