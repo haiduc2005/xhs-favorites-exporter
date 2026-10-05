@@ -10,11 +10,24 @@
   var initialSnapshotSent = false;
   var pollAttempts = 0;
   var maxPollAttempts = 60;
+  var channelToken = null;
+
+  try {
+    var currentScript = document.currentScript;
+    channelToken =
+      (currentScript &&
+        currentScript.dataset &&
+        currentScript.dataset.xhsBridgeToken) ||
+      null;
+  } catch (readTokenError) {
+    channelToken = null;
+  }
 
   function emit(type, payload) {
     window.postMessage(
       {
         source: BRIDGE_SOURCE,
+        channel: channelToken,
         type: type,
         payload: payload || {}
       },
@@ -105,6 +118,20 @@
     return value == null ? null : String(value);
   }
 
+  function buildNoteUrl(noteId, token) {
+    var boardMatch = window.location.pathname.match(/^\/board\/([^/]+)/);
+    var baseUrl = boardMatch
+      ? "https://www.rednote.com/board/" +
+        encodeURIComponent(boardMatch[1]) +
+        "/" +
+        encodeURIComponent(String(noteId))
+      : "https://www.rednote.com/explore/" + encodeURIComponent(String(noteId));
+
+    return token
+      ? baseUrl + "?xsec_token=" + encodeURIComponent(String(token))
+      : baseUrl;
+  }
+
   function normalizeFavoriteItem(rawItem, source) {
     var item = unwrapReactive(rawItem) || {};
     var noteCard = unwrapReactive(item.noteCard) || item;
@@ -155,10 +182,7 @@
       interactInfo.liked_count
     ]);
 
-    var baseUrl = "https://www.rednote.com/explore/" + encodeURIComponent(String(noteId));
-    var url = xsecToken
-      ? baseUrl + "?xsec_token=" + encodeURIComponent(String(xsecToken))
-      : baseUrl;
+    var url = buildNoteUrl(noteId, xsecToken);
 
     return {
       note_id: String(noteId),
@@ -214,37 +238,155 @@
   }
 
   function readInitialSnapshot() {
-    var state = unwrapReactive(window.__INITIAL_STATE__);
+    var rootState = unwrapReactive(window.__INITIAL_STATE__);
 
-    if (!state || !state.user) {
+    if (!rootState) {
       return null;
     }
 
-    var userState = unwrapReactive(state.user) || {};
-    var notesCollection = unwrapReactive(userState.notes);
-    var queriesCollection = unwrapReactive(userState.noteQueries);
+    var candidates = collectProfileCandidates(rootState);
 
-    if (!notesCollection) {
+    if (candidates.length === 0) {
+      candidates = scanStateForCandidates(rootState, 3);
+    }
+
+    if (candidates.length === 0) {
       return null;
     }
 
-    var favoriteList = Array.isArray(notesCollection)
-      ? notesCollection[1]
-      : notesCollection[1];
-    var favoriteQuery = Array.isArray(queriesCollection)
-      ? queriesCollection[1]
-      : queriesCollection && queriesCollection[1];
+    candidates.sort(function sortCandidates(left, right) {
+      return scoreCandidate(right) - scoreCandidate(left);
+    });
 
-    var normalizedItems = extractFavoriteItems(favoriteList)
-      .map(function mapFavoriteItem(item) {
-        return normalizeFavoriteItem(item, "ssr");
-      })
-      .filter(Boolean);
+    var best = candidates[0];
 
     return {
-      items: normalizedItems,
-      page: normalizePageInfo(favoriteQuery)
+      items: best.items,
+      page: best.page
     };
+  }
+
+  function collectProfileCandidates(rootState) {
+    var userState = unwrapReactive(rootState.user) || {};
+    var notesCollection = unwrapReactive(userState.notes);
+
+    var keys = null;
+
+    if (Array.isArray(notesCollection)) {
+      keys = [];
+      for (var index = 0; index < notesCollection.length; index += 1) {
+        keys.push(String(index));
+      }
+    } else if (notesCollection && typeof notesCollection === "object") {
+      keys = Object.keys(notesCollection);
+    }
+
+    if (!keys) {
+      return [];
+    }
+
+    var candidates = [];
+
+    keys.forEach(function buildCandidate(key) {
+      var rawList = Array.isArray(notesCollection)
+        ? notesCollection[Number(key)]
+        : notesCollection[key];
+
+      if (rawList == null) {
+        return;
+      }
+
+      var normalizedItems = extractFavoriteItems(rawList)
+        .map(function mapFavoriteItem(item) {
+          return normalizeFavoriteItem(item, "ssr");
+        })
+        .filter(Boolean);
+
+      var page = normalizePageInfo(
+        resolveQueryAt(unwrapReactive(userState.noteQueries), key)
+      );
+
+      if (normalizedItems.length > 0 || page.cursor || page.has_more) {
+        candidates.push({ items: normalizedItems, page: page });
+      }
+    });
+
+    return candidates;
+  }
+
+  function scanStateForCandidates(rootState, maxDepth) {
+    var candidates = [];
+    var seen = new Set();
+
+    function visit(value, depth) {
+      if (value == null || depth > maxDepth) {
+        return;
+      }
+
+      var unwrapped = unwrapReactive(value);
+
+      if (typeof unwrapped !== "object" || seen.has(unwrapped)) {
+        return;
+      }
+
+      seen.add(unwrapped);
+
+      var normalizedItems = extractFavoriteItems(unwrapped)
+        .map(function mapFavoriteItem(item) {
+          return normalizeFavoriteItem(item, "ssr");
+        })
+        .filter(Boolean);
+
+      if (normalizedItems.length > 0) {
+        candidates.push({
+          items: normalizedItems,
+          page: normalizePageInfo(null)
+        });
+      }
+
+      if (Array.isArray(unwrapped)) {
+        for (var index = 0; index < unwrapped.length; index += 1) {
+          visit(unwrapped[index], depth + 1);
+        }
+        return;
+      }
+
+      var ownKeys = Object.keys(unwrapped);
+      for (var keyIndex = 0; keyIndex < ownKeys.length; keyIndex += 1) {
+        visit(unwrapped[ownKeys[keyIndex]], depth + 1);
+      }
+    }
+
+    visit(rootState, 0);
+    return candidates;
+  }
+
+  function resolveQueryAt(queriesCollection, key) {
+    if (Array.isArray(queriesCollection)) {
+      return queriesCollection[Number(key)];
+    }
+
+    if (queriesCollection && typeof queriesCollection === "object") {
+      return queriesCollection[key];
+    }
+
+    return null;
+  }
+
+  function scoreCandidate(candidate) {
+    var score = 0;
+
+    if (candidate.page.cursor) {
+      score += 1000;
+    }
+
+    if (candidate.page.has_more) {
+      score += 100;
+    }
+
+    score += Math.min(candidate.items.length, 500);
+
+    return score;
   }
 
   function tryEmitInitialSnapshot(force) {
@@ -255,15 +397,6 @@
     }
 
     if (!force && initialSnapshotSent && snapshot.items.length === 0) {
-      return false;
-    }
-
-    if (
-      !force &&
-      initialSnapshotSent &&
-      snapshot.items.length === 0 &&
-      !snapshot.page.cursor
-    ) {
       return false;
     }
 
@@ -314,13 +447,40 @@
       var meta = this.__xhsFavoritesExporterMeta;
       var startedAt = Date.now();
 
-      if (meta && meta.url && meta.url.indexOf(COLLECT_PATH) !== -1) {
+      var isBoardContext = /\/board\//.test(window.location.pathname);
+      var isCollectRequest =
+        meta &&
+        meta.url &&
+        (meta.url.indexOf(COLLECT_PATH) !== -1 ||
+          (isBoardContext && meta.url.indexOf("collect") !== -1));
+
+      if (isCollectRequest) {
+        function emitError(stage, status, url) {
+          emit("BRIDGE_XHR_ERROR", {
+            stage: stage,
+            status: status,
+            url: url,
+            message: stage === "http" ? "HTTP " + status : "请求" + stage
+          });
+        }
+
         this.addEventListener(
           "load",
           function onCollectPageLoaded() {
             var responseUrl = this.responseURL || meta.url || "";
+            var isCollectResponse =
+              responseUrl.indexOf(COLLECT_PATH) !== -1 ||
+              (/\/board\//.test(window.location.pathname) &&
+                responseUrl.indexOf("collect") !== -1);
 
-            if (responseUrl.indexOf(COLLECT_PATH) === -1) {
+            if (!isCollectResponse) {
+              return;
+            }
+
+            var status = typeof this.status === "number" ? this.status : 0;
+
+            if (status < 200 || status >= 300) {
+              emitError("http", status, responseUrl);
               return;
             }
 
@@ -338,7 +498,7 @@
                 : [];
 
             emit("COLLECT_PAGE", {
-              status: this.status,
+              status: status,
               url: responseUrl,
               duration_ms: Date.now() - startedAt,
               page: {
@@ -358,6 +518,42 @@
                 })
                 .filter(Boolean)
             });
+          },
+          { once: true }
+        );
+
+        this.addEventListener(
+          "error",
+          function onCollectPageError() {
+            emitError(
+              "network",
+              typeof this.status === "number" ? this.status : 0,
+              meta.url
+            );
+          },
+          { once: true }
+        );
+
+        this.addEventListener(
+          "timeout",
+          function onCollectPageTimeout() {
+            emitError(
+              "timeout",
+              typeof this.status === "number" ? this.status : 0,
+              meta.url
+            );
+          },
+          { once: true }
+        );
+
+        this.addEventListener(
+          "abort",
+          function onCollectPageAbort() {
+            emitError(
+              "abort",
+              typeof this.status === "number" ? this.status : 0,
+              meta.url
+            );
           },
           { once: true }
         );
