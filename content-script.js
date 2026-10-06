@@ -9,7 +9,7 @@
   var SHADOW_HOST_ID = "xhs-favorites-exporter-host";
   var SCAN_EVENT = "xhs-favorites-exporter:scan-now";
   var AUTO_SCROLL_DELAY_MS = 1400;
-  var MAX_IDLE_ROUNDS = 6;
+  var MAX_IDLE_ROUNDS = 10;
   var MAX_COLLECT_ROUNDS = 200;
   var MAX_TITLE_LENGTH = 120;
   var STORAGE_KEY = "xhsFavoritesExportState";
@@ -20,6 +20,7 @@
     idleRounds: 0,
     rounds: 0,
     channelToken: "",
+    collectionName: null,
     lastNetworkAt: 0,
     pageInfo: null,
     statusText: "等待页面就绪",
@@ -36,9 +37,11 @@
     tokenValue: null,
     sourceValue: null,
     statusValue: null,
+    boardNameValue: null,
     startButton: null,
     stopButton: null,
     exportButton: null,
+    exportCsvButton: null,
     resetButton: null,
     scanButton: null
   };
@@ -78,6 +81,122 @@
   function getBoardId() {
     var match = window.location.pathname.match(/^\/board\/([^/]+)/);
     return match ? match[1] : null;
+  }
+
+  var SITE_NAME_RE = /^(?:新版小红书|小红书|RedNote|rednote|Red Note|Xiaohongshu)$/i;
+  var SITE_SUFFIX_RE = [
+    "新版小红书",
+    "小红书",
+    "RedNote",
+    "rednote",
+    "Red Note",
+    "Xiaohongshu"
+  ];
+
+  function stripSiteSuffix(title) {
+    var clean = String(title || "")
+      .trim()
+      .replace(/\s+/g, " ");
+
+    for (var round = 0; round < 4; round += 1) {
+      var changed = false;
+
+      SITE_SUFFIX_RE.forEach(function removeSiteName(siteName) {
+        var pattern = new RegExp("\\s*[|·\\-–—]\\s*" + siteName + "\\s*$", "i");
+
+        if (pattern.test(clean)) {
+          clean = clean.replace(pattern, "").trim();
+          changed = true;
+        }
+      });
+
+      if (!changed) {
+        break;
+      }
+    }
+
+    if (SITE_NAME_RE.test(clean)) {
+      return "";
+    }
+
+    return clean;
+  }
+
+  function sanitizeFileNamePart(text) {
+    if (text == null) {
+      return null;
+    }
+
+    var cleaned = String(text)
+      .replace(/[\r\n\t]/g, " ")
+      .replace(/\s+/g, " ")
+      .replace(/[\\/:*?"<>|]+/g, "_")
+      .trim()
+      .replace(/^[.\s]+|[.\s]+$/g, "");
+
+    if (!cleaned) {
+      return null;
+    }
+
+    if (cleaned.length > 60) {
+      cleaned = cleaned.slice(0, 60);
+    }
+
+    return cleaned;
+  }
+
+  function formatFileDate(date) {
+    var year = date.getFullYear();
+    var month = date.getMonth() + 1;
+    var day = date.getDate();
+
+    return (
+      String(year) +
+      (month < 10 ? "0" : "") + month +
+      (day < 10 ? "0" : "") + day
+    );
+  }
+
+  function getCollectionName() {
+    if (!/^\/board\//.test(window.location.pathname)) {
+      return null;
+    }
+
+    var candidates = [];
+
+    if (state.collectionName) {
+      candidates.push(state.collectionName);
+    }
+
+    var ogMeta = null;
+
+    try {
+      ogMeta = document.querySelector('meta[property="og:title"]');
+    } catch (error) {
+      ogMeta = null;
+    }
+
+    if (ogMeta) {
+      var ogValue = ogMeta.content || (ogMeta.getAttribute && ogMeta.getAttribute("content"));
+
+      if (ogValue) {
+        candidates.push(String(ogValue));
+      }
+    }
+
+    if (document.title) {
+      candidates.push(document.title);
+    }
+
+    for (var index = 0; index < candidates.length; index += 1) {
+      var cleaned = sanitizeFileNamePart(stripSiteSuffix(candidates[index]));
+
+      if (cleaned) {
+        return cleaned;
+      }
+    }
+
+    return null;
   }
 
   function getProfileKey() {
@@ -201,6 +320,7 @@
 
     ui.host = null;
     ui.shadow = null;
+    ui.boardNameValue = null;
     ui.countValue = null;
     ui.tokenValue = null;
     ui.sourceValue = null;
@@ -208,6 +328,7 @@
     ui.startButton = null;
     ui.stopButton = null;
     ui.exportButton = null;
+    ui.exportCsvButton = null;
     ui.resetButton = null;
     ui.scanButton = null;
 
@@ -267,6 +388,12 @@
       '.title{' +
       'font-size:15px;' +
       'font-weight:700;' +
+      'margin-bottom:10px;' +
+      '}' +
+      '.board-name{' +
+      'font-size:14px;' +
+      'font-weight:600;' +
+      'color:#e8590c;' +
       'margin-bottom:10px;' +
       '}' +
       '.meta{' +
@@ -336,6 +463,7 @@
       '</style>' +
       '<div id="panel">' +
       '<div class="title">小红书收藏导出器</div>' +
+      '<div class="board-name" data-role="board-name" style="display:none;"></div>' +
       '<div class="meta">' +
       '<div class="card"><div class="label">条目数</div><div class="value" data-role="count">0</div></div>' +
       '<div class="card"><div class="label">缺 token</div><div class="value" data-role="token-missing">0</div></div>' +
@@ -347,7 +475,8 @@
       '<button class="secondary" data-action="stop">停止</button>' +
       '<button class="ghost" data-action="scan">补扫首屏</button>' +
       '<button class="ghost" data-action="export">导出 JSON</button>' +
-      '<button class="warn" data-action="reset" style="grid-column:1 / -1;">清空本次结果</button>' +
+      '<button class="ghost" data-action="export-csv">导出 CSV</button>' +
+      '<button class="warn" data-action="reset">清空本次结果</button>' +
       '</div>' +
       '<div class="hint">先打开小红书个人页的“收藏”Tab，再刷新一次页面。插件会读首屏 SSR，并拦截后续收藏分页的 XHR。</div>' +
       "</div>";
@@ -358,9 +487,11 @@
     ui.tokenValue = root.querySelector('[data-role="token-missing"]');
     ui.sourceValue = root.querySelector('[data-role="sources"]');
     ui.statusValue = root.querySelector('[data-role="status"]');
+    ui.boardNameValue = root.querySelector('[data-role="board-name"]');
     ui.startButton = root.querySelector('[data-action="start"]');
     ui.stopButton = root.querySelector('[data-action="stop"]');
     ui.exportButton = root.querySelector('[data-action="export"]');
+    ui.exportCsvButton = root.querySelector('[data-action="export-csv"]');
     ui.resetButton = root.querySelector('[data-action="reset"]');
     ui.scanButton = root.querySelector('[data-action="scan"]');
 
@@ -369,6 +500,7 @@
       stopCollection();
     });
     ui.exportButton.addEventListener("click", exportResults);
+    ui.exportCsvButton.addEventListener("click", exportResultsCsv);
     ui.resetButton.addEventListener("click", resetResults);
     ui.scanButton.addEventListener("click", requestInitialSnapshot);
 
@@ -648,9 +780,26 @@
     ui.tokenValue.textContent = String(countMissingTokens());
     ui.sourceValue.textContent = summarizeSources();
     ui.statusValue.innerHTML = escapeHtml(state.statusText);
+
+    if (ui.boardNameValue) {
+      if (state.collectionName) {
+        ui.boardNameValue.textContent = "专辑：" + state.collectionName;
+        ui.boardNameValue.style.display = "";
+      } else if (/^\/board\//.test(window.location.pathname)) {
+        ui.boardNameValue.textContent = "专辑：未识别（刷新页面或按「补扫首屏」）";
+        ui.boardNameValue.style.display = "";
+      } else {
+        ui.boardNameValue.textContent = "";
+        ui.boardNameValue.style.display = "none";
+      }
+    }
+
     ui.startButton.disabled = state.running;
     ui.stopButton.disabled = !state.running;
     ui.exportButton.disabled = state.items.size === 0;
+    if (ui.exportCsvButton) {
+      ui.exportCsvButton.disabled = state.items.size === 0;
+    }
   }
 
   function requestInitialSnapshot() {
@@ -680,6 +829,7 @@
       left: 0,
       behavior: "smooth"
     });
+    window.dispatchEvent(new Event("scroll"));
   }
 
   function stopCollection(reason) {
@@ -735,7 +885,11 @@
         }
 
         if (state.idleRounds >= MAX_IDLE_ROUNDS && isNearBottom()) {
-          stopCollection("已自动停止：滚动到底且连续多轮无新增");
+          var hasMore = state.pageInfo ? state.pageInfo.has_more : null;
+          var reason = hasMore === false
+            ? "已采集完毕：接口返回已无更多数据"
+            : "已自动停止：滚动到底且连续多轮无新增";
+          stopCollection(reason);
           return;
         }
 
@@ -783,34 +937,24 @@
     scheduleRender();
   }
 
-  function exportResults() {
-    if (state.items.size === 0) {
-      setStatus("当前没有可导出的结果");
-      return;
-    }
-
-    var items = Array.from(state.items.values()).sort(function sortByTime(left, right) {
+  function sortedItems() {
+    return Array.from(state.items.values()).sort(function sortByTime(left, right) {
       return String(left.first_seen_at).localeCompare(String(right.first_seen_at));
     });
+  }
 
-    var payload = {
-      exported_at: new Date().toISOString(),
-      page_url: window.location.href,
-      total_items: items.length,
-      missing_token_count: countMissingTokens(),
-      page_info: state.pageInfo,
-      items: items
-    };
+  function buildFileName(collectionName, extension) {
+    var stamp = formatFileDate(new Date());
+    var baseName = collectionName
+      ? collectionName + "-" + stamp
+      : "xhs-favorites-" + stamp;
+    return baseName + "." + extension;
+  }
 
-    var blob = new Blob([JSON.stringify(payload, null, 2)], {
-      type: "application/json"
-    });
+  function downloadTextFile(fileName, mimeType, content) {
+    var blob = new Blob([content], { type: mimeType });
     var url = URL.createObjectURL(blob);
     var anchor = document.createElement("a");
-    var fileName =
-      "xhs-favorites-" +
-      new Date().toISOString().replace(/[:.]/g, "-") +
-      ".json";
 
     anchor.href = url;
     anchor.download = fileName;
@@ -818,8 +962,88 @@
     document.documentElement.appendChild(anchor);
     anchor.click();
     anchor.remove();
-    URL.revokeObjectURL(url);
+    setTimeout(function delayedRevoke() {
+      URL.revokeObjectURL(url);
+    }, 1000);
+  }
 
+  function escapeCsvField(value) {
+    var text = value == null ? "" : String(value);
+
+    if (/^[=+\-@\t\r]/.test(text)) {
+      text = "'" + text;
+    }
+
+    return '"' + text.replace(/"/g, '""') + '"';
+  }
+
+  function buildCsv(items) {
+    var columns = [
+      "note_id",
+      "title",
+      "author",
+      "url",
+      "xsec_token",
+      "liked_count",
+      "note_type",
+      "sources",
+      "cover",
+      "first_seen_at",
+      "last_seen_at"
+    ];
+
+    var lines = [columns.map(function mapHeader(column) {
+      return escapeCsvField(column);
+    }).join(",")];
+
+    items.forEach(function mapRow(item) {
+      var row = columns.map(function mapColumn(column) {
+        var value = column === "sources"
+          ? (item.sources || []).join("/")
+          : item[column];
+        return escapeCsvField(value);
+      }).join(",");
+      lines.push(row);
+    });
+
+    return "\uFEFF" + lines.join("\r\n");
+  }
+
+  function exportResults() {
+    if (state.items.size === 0) {
+      setStatus("当前没有可导出的结果");
+      return;
+    }
+
+    var items = sortedItems();
+    var collectionName = getCollectionName();
+    var fileName = buildFileName(collectionName, "json");
+
+    var payload = {
+      exported_at: new Date().toISOString(),
+      page_url: window.location.href,
+      total_items: items.length,
+      missing_token_count: countMissingTokens(),
+      page_info: state.pageInfo,
+      collection_name: collectionName || null,
+      items: items
+    };
+
+    downloadTextFile(fileName, "application/json", JSON.stringify(payload, null, 2));
+    setStatus("已导出 " + items.length + " 条到 " + fileName);
+  }
+
+  function exportResultsCsv() {
+    if (state.items.size === 0) {
+      setStatus("当前没有可导出的结果");
+      return;
+    }
+
+    var items = sortedItems();
+    var collectionName = getCollectionName();
+    var fileName = buildFileName(collectionName, "csv");
+
+    downloadTextFile(fileName, "text/csv;charset=utf-8", buildCsv(items));
     setStatus("已导出 " + items.length + " 条到 " + fileName);
   }
 
@@ -862,8 +1086,29 @@
       return;
     }
 
+    if (type === "BOARD_INFO") {
+      if (payload.board_name) {
+        var cleanedBoardName = sanitizeFileNamePart(stripSiteSuffix(String(payload.board_name)));
+
+        if (cleanedBoardName) {
+          state.collectionName = cleanedBoardName;
+          scheduleRender();
+        }
+      }
+      return;
+    }
+
     if (type === "INITIAL_SNAPSHOT") {
       state.pageInfo = payload.page || state.pageInfo;
+
+      if (payload.board_name) {
+        var incomingBoardName = sanitizeFileNamePart(stripSiteSuffix(String(payload.board_name)));
+
+        if (incomingBoardName) {
+          state.collectionName = incomingBoardName;
+        }
+      }
+
       mergeItems(payload.items || []);
       setStatus(
         "已拿到首屏 SSR 数据，目前 " + state.items.size + " 条"

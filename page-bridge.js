@@ -7,10 +7,33 @@
 
   var BRIDGE_SOURCE = "xhs-favorites-exporter";
   var COLLECT_PATH = "/api/sns/web/v2/note/collect/page";
+  var BOARD_NOTE_PATH = "/api/sns/web/v1/board/note";
   var initialSnapshotSent = false;
+  var boardNameSent = false;
   var pollAttempts = 0;
   var maxPollAttempts = 60;
   var channelToken = null;
+
+  function isTargetNoteRequest(url) {
+    if (!url || typeof url !== "string") {
+      return false;
+    }
+
+    if (url.indexOf(COLLECT_PATH) !== -1) {
+      return true;
+    }
+
+    if (url.indexOf(BOARD_NOTE_PATH) !== -1 || url.indexOf("/board/note") !== -1) {
+      return true;
+    }
+
+    var isBoardContext = /\/board\//.test(window.location.pathname);
+    if (isBoardContext && url.indexOf("board") !== -1 && url.indexOf("note") !== -1) {
+      return true;
+    }
+
+    return false;
+  }
 
   try {
     var currentScript = document.currentScript;
@@ -226,6 +249,10 @@
       return collection.items;
     }
 
+    if (Array.isArray(collection.notes)) {
+      return collection.notes;
+    }
+
     if (Array.isArray(collection.noteList)) {
       return collection.noteList;
     }
@@ -237,6 +264,41 @@
     return [];
   }
 
+  function collectBoardCandidates(rootState) {
+    var boardMatch = window.location.pathname.match(/^\/board\/([^/]+)/);
+    if (!boardMatch || !rootState) {
+      return [];
+    }
+
+    var boardId = boardMatch[1];
+    var boardState = unwrapReactive(rootState.board) || {};
+    var feedsMap = unwrapReactive(boardState.boardFeedsMap) || {};
+    var boardFeed = unwrapReactive(feedsMap[boardId]);
+
+    if (!boardFeed) {
+      return [];
+    }
+
+    var rawNotes = extractFavoriteItems(boardFeed);
+    var normalizedItems = rawNotes
+      .map(function mapFavoriteItem(item) {
+        return normalizeFavoriteItem(item, "ssr");
+      })
+      .filter(Boolean);
+
+    if (normalizedItems.length === 0 && !boardFeed.cursor && !boardFeed.hasMore) {
+      return [];
+    }
+
+    return [{
+      items: normalizedItems,
+      page: normalizePageInfo({
+        cursor: boardFeed.cursor,
+        has_more: boardFeed.hasMore != null ? boardFeed.hasMore : boardFeed.has_more
+      })
+    }];
+  }
+
   function readInitialSnapshot() {
     var rootState = unwrapReactive(window.__INITIAL_STATE__);
 
@@ -244,7 +306,11 @@
       return null;
     }
 
-    var candidates = collectProfileCandidates(rootState);
+    var candidates = collectBoardCandidates(rootState);
+
+    if (candidates.length === 0) {
+      candidates = collectProfileCandidates(rootState);
+    }
 
     if (candidates.length === 0) {
       candidates = scanStateForCandidates(rootState, 3);
@@ -262,7 +328,8 @@
 
     return {
       items: best.items,
-      page: best.page
+      page: best.page,
+      board_name: extractBoardNameFromState(rootState)
     };
   }
 
@@ -389,6 +456,90 @@
     return score;
   }
 
+  function extractBoardNameFromState(rootState) {
+    var boardMatch = window.location.pathname.match(/^\/board\/([^/]+)/);
+
+    if (!boardMatch || !rootState) {
+      return null;
+    }
+
+    var boardId = boardMatch[1];
+    var visited = new Set();
+    var budget = 20000;
+    var steps = 0;
+    var found = null;
+    var nameKeys = [
+      "name",
+      "title",
+      "boardName",
+      "board_name",
+      "collectionName",
+      "collection_name",
+      "displayName",
+      "folderName"
+    ];
+
+    function plausibleName(text) {
+      if (typeof text !== "string" || text.length < 1 || text.length > 60) {
+        return false;
+      }
+
+      if (/^https?:\/\//i.test(text)) {
+        return false;
+      }
+
+      if (/^[\d\s:.,\-+]+$/.test(text)) {
+        return false;
+      }
+
+      return true;
+    }
+
+    function visit(value) {
+      if (found || value == null || typeof value !== "object") {
+        return;
+      }
+
+      var unwrapped = unwrapReactive(value);
+
+      if (typeof unwrapped !== "object" || unwrapped == null || visited.has(unwrapped)) {
+        return;
+      }
+
+      visited.add(unwrapped);
+      steps += 1;
+
+      if (steps > budget) {
+        return;
+      }
+
+      if (!Array.isArray(unwrapped)) {
+        var parentKeys = Object.keys(unwrapped);
+
+        for (var index = 0; index < parentKeys.length; index += 1) {
+          if (String(unwrapped[parentKeys[index]]) === boardId) {
+            for (var nameIndex = 0; nameIndex < nameKeys.length; nameIndex += 1) {
+              var nameValue = unwrapped[nameKeys[nameIndex]];
+
+              if (plausibleName(nameValue)) {
+                found = String(nameValue).trim();
+                return;
+              }
+            }
+          }
+        }
+      }
+
+      var ownKeys = Object.keys(unwrapped);
+      for (var keyIndex = 0; keyIndex < ownKeys.length; keyIndex += 1) {
+        visit(unwrapped[ownKeys[keyIndex]]);
+      }
+    }
+
+    visit(rootState);
+    return found;
+  }
+
   function tryEmitInitialSnapshot(force) {
     var snapshot = readInitialSnapshot();
 
@@ -412,6 +563,17 @@
   function startInitialStatePolling() {
     var timer = window.setInterval(function pollInitialState() {
       pollAttempts += 1;
+
+      if (!boardNameSent) {
+        var boardName = extractBoardNameFromState(
+          unwrapReactive(window.__INITIAL_STATE__)
+        );
+
+        if (boardName) {
+          boardNameSent = true;
+          emit("BOARD_INFO", { board_name: boardName });
+        }
+      }
 
       if (tryEmitInitialSnapshot(false) || pollAttempts >= maxPollAttempts) {
         window.clearInterval(timer);
@@ -447,12 +609,7 @@
       var meta = this.__xhsFavoritesExporterMeta;
       var startedAt = Date.now();
 
-      var isBoardContext = /\/board\//.test(window.location.pathname);
-      var isCollectRequest =
-        meta &&
-        meta.url &&
-        (meta.url.indexOf(COLLECT_PATH) !== -1 ||
-          (isBoardContext && meta.url.indexOf("collect") !== -1));
+      var isCollectRequest = meta && isTargetNoteRequest(meta.url);
 
       if (isCollectRequest) {
         function emitError(stage, status, url) {
@@ -468,10 +625,7 @@
           "load",
           function onCollectPageLoaded() {
             var responseUrl = this.responseURL || meta.url || "";
-            var isCollectResponse =
-              responseUrl.indexOf(COLLECT_PATH) !== -1 ||
-              (/\/board\//.test(window.location.pathname) &&
-                responseUrl.indexOf("collect") !== -1);
+            var isCollectResponse = isTargetNoteRequest(responseUrl);
 
             if (!isCollectResponse) {
               return;
@@ -570,6 +724,7 @@
   installXmlHttpRequestHook();
   startInitialStatePolling();
   emit("BRIDGE_READY", {
-    collect_path: COLLECT_PATH
+    collect_path: COLLECT_PATH,
+    board_note_path: BOARD_NOTE_PATH
   });
 })();
